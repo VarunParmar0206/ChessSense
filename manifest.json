@@ -1,0 +1,25 @@
+
+{
+  "manifest_version": 3,
+  "name": "ChessSense",
+  "version": "1.0",
+  "description": "Reads the chess.com board state from the DOM and shows a visual overlay with Stockfish analysis.",
+  "permissions": [],
+  "web_accessible_resources": [
+    {
+      "resources": ["stockfish.js", "stockfish.wasm"],
+      "matches": ["https://www.chess.com/*"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.chess.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
