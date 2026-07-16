@@ -25,19 +25,8 @@ ChessSense automatically detects the current board position, converts it into **
 
 ## 📸 Screenshots
 
-> Add screenshots here.
-
-Example:
-
-```
 screenshots/
-├── board-analysis.png
 ├── engine-overlay.png
-├── multipv-analysis.png
-└── evaluation-display.png
-```
-
----
 
 ## 🛠 Tech Stack
 
