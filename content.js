@@ -49,6 +49,12 @@ function initStockfishWorker() {
       engineReady = false;
     };
     sendToEngine('uci');
+    try {
+      sendToEngine('setoption name Threads value 1');
+    } catch (e) {}
+    try {
+      sendToEngine('setoption name Hash value 128');
+    } catch (e) {}
   } catch (err) {
     console.error('[Engine] Failed to initialize worker:', err);
     stockfishWorker = null;
@@ -134,24 +140,61 @@ function inferCastlingRights(boardObj) {
   return rights || '-';
 }
 
-// FIX: turn is now passed in and used correctly (was always 'w')
-// FIX: castling rights are inferred from the position instead of hardcoded
-function analyzePosition(fen, turn, boardObj) {
+// Improved FEN construction with full position info
+function getEnPassantSquare(boardObj, lastMove) {
+  if (!lastMove || lastMove.length < 4) return '-';
+  const from = lastMove.slice(0, 2);
+  const to = lastMove.slice(2, 4);
+  const fromRank = parseInt(from[1]);
+  const toRank = parseInt(to[1]);
+  const file = to[0];
+  if (fromRank === 2 && toRank === 4) {
+    return file + '3';
+  }
+  if (fromRank === 7 && toRank === 5) {
+    return file + '6';
+  }
+  return '-';
+}
+
+function getFullFen(fen, turn, boardObj, moveHistory, castlingOverride) {
+  const turnChar = turn === 'black' ? 'b' : 'w';
+  let castling = castlingOverride !== undefined ? castlingOverride : (boardObj ? inferCastlingRights(boardObj) : '-');
+  let enPassant = '-';
+  let halfmove = '0';
+  let fullmove = '1';
+  if (moveHistory && moveHistory.length > 0) {
+    const lastMove = moveHistory[moveHistory.length - 1];
+    enPassant = getEnPassantSquare(boardObj, lastMove);
+    halfmove = '0';
+    fullmove = Math.floor(moveHistory.length / 2) + 1;
+  }
+  return `${fen} ${turnChar} ${castling} ${enPassant} ${halfmove} ${fullmove}`;
+}
+
+function analyzePosition(fen, turn, boardObj, options = {}) {
   if (!engineReady || !stockfishWorker) return;
 
-  const turnChar = turn === 'black' ? 'b' : 'w';
-  const castling = boardObj ? inferCastlingRights(boardObj) : '-';
-  const fullFen  = `${fen} ${turnChar} ${castling} - 0 1`;
+  const fullFen = options.fullFen || getFullFen(fen, turn, boardObj, options.moveHistory, options.castling);
 
   if (fullFen === previousEngineFen && !engineData.thinking) return;
   if (currentEngineSearch) sendToEngine('stop');
 
-  previousEngineFen     = fullFen;
-  engineData.thinking   = true;
-  engineData.lines      = [];
+  previousEngineFen = fullFen;
+  engineData.thinking = true;
+  engineData.lines = [];
   engineData.pendingLines = {};
 
   sendToEngine('position fen ' + fullFen);
+  try {
+    sendToEngine('setoption name MultiPV value 1');
+  } catch (e) {}
+  try {
+    sendToEngine('setoption name UCI_LimitStrength value false');
+  } catch (e) {}
+  try {
+    sendToEngine('setoption name Skill Level value 20');
+  } catch (e) {}
   sendToEngine('go depth ' + ENGINE_DEPTH);
   currentEngineSearch = fullFen;
 }
@@ -307,6 +350,10 @@ function isGamePage() {
   return /\/(live|game|play|puzzles|analysis)/.test(window.location.href);
 }
 
+function isReviewPage() {
+  return /\/(analysis|review)/.test(window.location.href);
+}
+
 // ============================================================
 // BUG FIX #2: TURN DETECTION FROM MOVE LIST
 // ============================================================
@@ -452,9 +499,8 @@ function updateBoardArrows(playerColor) {
   const old = document.getElementById('sf-arrows-svg');
   if (old) old.remove();
 
-  // Only draw when it's the player's turn and the engine has results
-  if (currentTurn !== playerColor) return;
-  if (!engineData.lines.length)    return;
+  if (!isGameOver && !isReviewPage() && currentTurn !== playerColor) return;
+  if (!engineData.lines.length) return;
 
   const board = getChessBoard();
   if (!board) return;
@@ -581,12 +627,20 @@ function refreshVisualizerLoop() {
         }
       }
 
-      // Only analyze when it's the player's turn
-      if (currentTurn === playerColor) {
-        analyzePosition(fen, currentTurn, boardObj);
+      const reviewMode = isReviewPage();
+      if (reviewMode || isGameOver) {
+        analyzePosition(fen, currentTurn, boardObj, { review: true });
       } else {
-        // Clear stale suggestions when it's opponent's turn
-        stopEngineSearch();
+        if (currentTurn === playerColor) {
+          analyzePosition(fen, currentTurn, boardObj, {});
+        } else {
+          stopEngineSearch();
+        }
+      }
+    } else if (isGameOver || isReviewPage()) {
+      const reviewMode = isReviewPage();
+      if (reviewMode || isGameOver) {
+        analyzePosition(fen, currentTurn, boardObj, { review: true });
       }
     }
 
@@ -615,6 +669,7 @@ function removeOverlays() {
 function stopVisualizer() {
   if (visualizerInterval) { clearInterval(visualizerInterval); visualizerInterval = null; }
   removeOverlays();
+  stopEngineSearch();
   currentGameId = null; lastFen = null;
   isGameOver    = false; currentTurn = 'white';
 }
