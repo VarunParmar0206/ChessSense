@@ -19,22 +19,15 @@ let engineReady = false;
 let currentEngineSearch = null;
 let previousEngineFen = null;
 
-// ── Engine mode: 'normal' or 'bullet' ──────────────────────
-const ENGINE_MODES = {
-  normal: { depth: 8, multipv: 3, label: 'Normal',  pollMs: 800 },
-  bullet: { depth: 3, multipv: 1, label: '⚡ Bullet', pollMs: 500 },
-};
-let engineMode = 'normal'; // active mode key
-
-function getActiveConfig() {
-  return ENGINE_MODES[engineMode] || ENGINE_MODES.normal;
-}
+// ── Engine config (Normal mode only) ──────────────────────
+const ENGINE_DEPTH = 8;
+const ENGINE_MULTIPV = 3;
+const ENGINE_POLL_MS = 800;
 
 // FIX: engineData now stores an array of lines instead of a single bestMove
 let engineData = {
-  lines: [],        // [{ move, evaluation, mate, depth }, ...]  index 0 = best
+  lines: [],        // [{ move, depth }, ...]  index 0 = best
   thinking: false,
-  depth: 0,
   pendingLines: {}  // accumulated while thinking, keyed by multipv number
 };
 
@@ -74,7 +67,7 @@ function handleStockfishMessage(event) {
   if (msg === 'uciok') {
     engineReady = true;
     sendToEngine('ucinewgame');
-    sendToEngine('setoption name MultiPV value ' + getActiveConfig().multipv);
+    sendToEngine('setoption name MultiPV value ' + ENGINE_MULTIPV);
     sendToEngine('isready');
     return;
   }
@@ -86,7 +79,7 @@ function handleStockfishMessage(event) {
 function parseEngineInfo(msg) {
   if (msg.startsWith('bestmove')) {
     // Search complete — commit pending lines
-    const mpv = getActiveConfig().multipv;
+    const mpv = ENGINE_MULTIPV;
     engineData.lines = [];
     for (let i = 1; i <= mpv; i++) {
       if (engineData.pendingLines[i]) {
@@ -111,19 +104,11 @@ function parseEngineInfo(msg) {
   const depth  = depthMatch  ? parseInt(depthMatch[1])   : 0;
   const move   = pvMatch[1];
 
-  let evaluation = null;
-  let mate       = null;
-  const cpMatch   = msg.match(/score cp (-?\d+)/);
-  const mateMatch = msg.match(/score mate (-?\d+)/);
-  if (cpMatch)   evaluation = (parseInt(cpMatch[1]) / 100).toFixed(2);
-  if (mateMatch) mate       = parseInt(mateMatch[1]);
-
   // Store the latest info for this pv line (higher depth = better)
   const existing = engineData.pendingLines[pvLine];
   if (!existing || depth >= existing.depth) {
-    engineData.pendingLines[pvLine] = { move, evaluation, mate, depth };
+    engineData.pendingLines[pvLine] = { move, depth };
   }
-  if (depth > engineData.depth) engineData.depth = depth;
 }
 
 // ============================================================
@@ -154,7 +139,6 @@ function inferCastlingRights(boardObj) {
 function analyzePosition(fen, turn, boardObj) {
   if (!engineReady || !stockfishWorker) return;
 
-  const cfg = getActiveConfig();
   const turnChar = turn === 'black' ? 'b' : 'w';
   const castling = boardObj ? inferCastlingRights(boardObj) : '-';
   const fullFen  = `${fen} ${turnChar} ${castling} - 0 1`;
@@ -166,42 +150,15 @@ function analyzePosition(fen, turn, boardObj) {
   engineData.thinking   = true;
   engineData.lines      = [];
   engineData.pendingLines = {};
-  engineData.depth      = 0;
 
   sendToEngine('position fen ' + fullFen);
-  sendToEngine('go depth ' + cfg.depth);
+  sendToEngine('go depth ' + ENGINE_DEPTH);
   currentEngineSearch = fullFen;
 }
 
 // ============================================================
 // MODE SWITCHING
 // ============================================================
-
-function setEngineMode(mode) {
-  if (!ENGINE_MODES[mode] || mode === engineMode) return;
-  engineMode = mode;
-  const cfg = getActiveConfig();
-
-  // Reconfigure the engine's MultiPV setting
-  if (currentEngineSearch) sendToEngine('stop');
-  sendToEngine('setoption name MultiPV value ' + cfg.multipv);
-  sendToEngine('isready');
-
-  // Clear stale results so arrows/panel update immediately
-  engineData.lines      = [];
-  engineData.pendingLines = {};
-  engineData.depth      = 0;
-  currentEngineSearch   = null;
-  previousEngineFen     = null;
-
-  // Restart the polling interval at the mode's speed
-  if (visualizerInterval) {
-    clearInterval(visualizerInterval);
-    visualizerInterval = setInterval(refreshVisualizerLoop, cfg.pollMs);
-  }
-
-  console.log(`[Chess Visualizer] Switched to ${cfg.label} mode (depth ${cfg.depth}, multipv ${cfg.multipv})`);
-}
 
 function stopEngineSearch() {
   if (currentEngineSearch) sendToEngine('stop');
@@ -227,13 +184,7 @@ function terminateStockfishWorker() {
 // BOARD / DOM HELPERS
 // ============================================================
 
-function pieceToUnicode(piece) {
-  const map = {
-    wp:'♙', wn:'♘', wb:'♗', wr:'♖', wq:'♕', wk:'♔',
-    bp:'♟', bn:'♞', bb:'♝', br:'♜', bq:'♛', bk:'♚'
-  };
-  return map[piece] || '';
-}
+
 
 // BUG FIX #5 & #10: Clean up flipped detection + use correct tag wc-chess-board
 function getPlayerColor() {
@@ -277,16 +228,6 @@ function getBoardState() {
     }
   }
   return boardObj;
-}
-
-function boardObjToMatrix(boardObj, playerColor) {
-  const ranks = playerColor === 'black'
-    ? ['1','2','3','4','5','6','7','8']
-    : ['8','7','6','5','4','3','2','1'];
-  const files = playerColor === 'black'
-    ? ['h','g','f','e','d','c','b','a']
-    : ['a','b','c','d','e','f','g','h'];
-  return ranks.map(r => files.map(f => boardObj[f + r] || ''));
 }
 
 // BUG FIX #3: Handle case where pieceInPos stays as a DOMTokenList
@@ -364,12 +305,6 @@ function detectNewGame(fen, pieceCount) {
 
 function isGamePage() {
   return /\/(live|game|play|puzzles|analysis)/.test(window.location.href);
-}
-
-function formatMove(uciMove) {
-  if (!uciMove || uciMove.length < 4) return uciMove || '—';
-  const promo = uciMove.length > 4 ? uciMove[4].toUpperCase() : '';
-  return `${uciMove.slice(0, 2)}→${uciMove.slice(2, 4)}${promo}`;
 }
 
 // ============================================================
@@ -547,7 +482,7 @@ function updateBoardArrows(playerColor) {
   `;
 
   // Draw worst→best so the best arrow renders on top
-  const maxArrows = getActiveConfig().multipv;
+  const maxArrows = ENGINE_MULTIPV;
   const lines = engineData.lines.slice(0, maxArrows);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
@@ -584,234 +519,8 @@ window.addEventListener('resize', redrawArrowsIfNeeded, { passive: true });
 window.addEventListener('scroll', redrawArrowsIfNeeded, { passive: true });
 
 // ============================================================
-// SIDEBAR OVERLAY PANEL
+// SIDEBAR OVERLAY PANEL (removed)
 // ============================================================
-
-function createVisualizationOverlay(matrix, fen, pieceCount, playerColor) {
-  let overlay = document.getElementById('chess-live-board-overlay');
-  if (!overlay) {
-    overlay = document.createElement('div');
-    overlay.id = 'chess-live-board-overlay';
-    overlay.style.cssText = `
-      position: fixed; top: 10px; right: 10px;
-      z-index: 2147483647;
-      background: #1a1a2e;
-      padding: 10px 12px 8px 12px;
-      border-radius: 8px; color: #fff;
-      font-family: monospace;
-      box-shadow: 0 4px 24px rgba(0,0,0,0.85);
-      border: 1px solid #3a3a5c;
-      user-select: none;
-    `;
-    document.body.appendChild(overlay);
-  }
-  overlay.innerHTML = '';
-
-  // ── Title ──────────────────────────────────────────────────
-  const statusText = isGameOver ? ' · GAME OVER' : '';
-  const title = document.createElement('div');
-  title.textContent = `BOARD · ${playerColor === 'black' ? 'Black' : 'White'}${statusText}`;
-  title.style.cssText = `
-    text-align:center; margin-bottom:8px; font-size:11px;
-    font-weight:bold; color:#a0c4ff; letter-spacing:2px;
-  `;
-  overlay.appendChild(title);
-
-  // ── Mode toggle switch ────────────────────────────────────
-  const toggleRow = document.createElement('div');
-  toggleRow.style.cssText = `
-    display:flex; align-items:center; justify-content:center;
-    margin-bottom:8px; gap:8px;
-  `;
-
-  const normalLabel = document.createElement('span');
-  normalLabel.textContent = '🎯 Normal';
-  normalLabel.style.cssText = `
-    font-size:10px; font-weight:bold; cursor:pointer;
-    color:${engineMode === 'normal' ? '#a0c4ff' : '#555'};
-    transition: color 0.2s;
-  `;
-  normalLabel.addEventListener('click', () => setEngineMode('normal'));
-
-  const toggleTrack = document.createElement('div');
-  toggleTrack.style.cssText = `
-    width:36px; height:18px; border-radius:9px; cursor:pointer;
-    background:${engineMode === 'bullet' ? '#f59e0b' : '#3a3a5c'};
-    position:relative; transition: background 0.3s;
-    box-shadow: inset 0 1px 3px rgba(0,0,0,0.4);
-  `;
-  const toggleKnob = document.createElement('div');
-  toggleKnob.style.cssText = `
-    width:14px; height:14px; border-radius:50%;
-    background:#fff; position:absolute; top:2px;
-    left:${engineMode === 'bullet' ? '20px' : '2px'};
-    transition: left 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
-  `;
-  toggleTrack.appendChild(toggleKnob);
-  toggleTrack.addEventListener('click', () => {
-    setEngineMode(engineMode === 'normal' ? 'bullet' : 'normal');
-  });
-
-  const bulletLabel = document.createElement('span');
-  bulletLabel.textContent = '⚡ Bullet';
-  bulletLabel.style.cssText = `
-    font-size:10px; font-weight:bold; cursor:pointer;
-    color:${engineMode === 'bullet' ? '#f59e0b' : '#555'};
-    transition: color 0.2s;
-  `;
-  bulletLabel.addEventListener('click', () => setEngineMode('bullet'));
-
-  toggleRow.appendChild(normalLabel);
-  toggleRow.appendChild(toggleTrack);
-  toggleRow.appendChild(bulletLabel);
-  overlay.appendChild(toggleRow);
-
-  // ── Mini board ─────────────────────────────────────────────
-  const files = playerColor === 'black'
-    ? ['h','g','f','e','d','c','b','a']
-    : ['a','b','c','d','e','f','g','h'];
-  const ranks = playerColor === 'black'
-    ? ['1','2','3','4','5','6','7','8']
-    : ['8','7','6','5','4','3','2','1'];
-
-  const boardWrapper = document.createElement('div');
-  boardWrapper.style.cssText = 'display:inline-block;';
-
-  for (let r = 0; r < 8; r++) {
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex; align-items:center;';
-
-    const rl = document.createElement('div');
-    rl.textContent = ranks[r];
-    rl.style.cssText = 'width:14px; font-size:9px; color:#777; text-align:right; padding-right:3px; flex-shrink:0;';
-    row.appendChild(rl);
-
-    for (let c = 0; c < 8; c++) {
-      const cell = document.createElement('div');
-      cell.style.cssText = `
-        width:32px; height:32px; display:flex;
-        align-items:center; justify-content:center;
-        background:${(r + c) % 2 === 0 ? '#f0d9b5' : '#b58863'};
-        position:relative; flex-shrink:0;
-      `;
-      const piece = matrix[r][c];
-      if (piece) {
-        const span = document.createElement('span');
-        span.textContent = pieceToUnicode(piece);
-        span.style.cssText = `
-          font-size:22px; line-height:1;
-          position:absolute; top:50%; left:50%;
-          transform:translate(-50%,-50%);
-          filter:drop-shadow(0 1px 1px ${
-            piece[0] === 'w' ? 'rgba(0,0,0,0.8)' : 'rgba(255,255,255,0.5)'
-          });
-        `;
-        cell.appendChild(span);
-      }
-      row.appendChild(cell);
-    }
-    boardWrapper.appendChild(row);
-  }
-
-  const fileRow = document.createElement('div');
-  fileRow.style.cssText = 'display:flex; margin-left:17px; margin-top:2px;';
-  files.forEach(f => {
-    const fl = document.createElement('div');
-    fl.textContent = f;
-    fl.style.cssText = 'width:32px; font-size:9px; color:#777; text-align:center;';
-    fileRow.appendChild(fl);
-  });
-  boardWrapper.appendChild(fileRow);
-  overlay.appendChild(boardWrapper);
-
-  // ── Stats / engine panel ────────────────────────────────────
-  const stats = document.createElement('div');
-  stats.style.cssText = 'margin-top:8px; text-align:center;';
-
-  const countLine = document.createElement('div');
-  countLine.textContent = `${pieceCount} pieces on board`;
-  countLine.style.cssText = 'font-size:10px; color:#aaa;';
-  stats.appendChild(countLine);
-
-  const enginePanel = document.createElement('div');
-  enginePanel.style.cssText = `
-    margin-top:6px; padding:6px 8px;
-    background:#0d0d1a; border:1px solid #2a2a5c; border-radius:4px;
-  `;
-
-  // Engine status line
-  const engineStatus = document.createElement('div');
-  engineStatus.style.cssText = 'font-size:9px; color:#7fb3ff; margin-bottom:4px;';
-  const modeTag = engineMode === 'bullet' ? ' [⚡ Bullet]' : '';
-  if (!engineReady) {
-    engineStatus.textContent = '⚙ Engine: Initializing...';
-  } else if (engineData.thinking) {
-    engineStatus.textContent = `⚙ Engine: Thinking… (depth ${engineData.depth})${modeTag}`;
-  } else {
-    engineStatus.textContent = `⚙ Engine: Ready (depth ${engineData.depth})${modeTag}`;
-  }
-  enginePanel.appendChild(engineStatus);
-
-  // Move lines (color-coded to match arrows)
-  const lineStyles = [
-    { dot: '🔴', label: 'Best', color: '#ff6666' },
-    { dot: '🟡', label: '2nd',  color: '#ffcc44' },
-    { dot: '🟢', label: '3rd',  color: '#66dd66' },
-  ];
-
-  const maxLines = getActiveConfig().multipv;
-  if (engineData.lines.length > 0) {
-    engineData.lines.slice(0, maxLines).forEach((line, i) => {
-      const row = document.createElement('div');
-      row.style.cssText = `
-        display:flex; justify-content:space-between;
-        font-size:11px; color:${lineStyles[i].color};
-        font-weight:bold; margin-top:3px;
-      `;
-      const lbl = document.createElement('span');
-      lbl.textContent = `${lineStyles[i].dot} ${lineStyles[i].label}: ${formatMove(line.move)}`;
-
-      const ev = document.createElement('span');
-      ev.style.cssText = 'font-size:10px; font-weight:normal; color:#aaa;';
-      if (line.mate !== null) {
-        ev.textContent = `M${Math.abs(line.mate)}`;
-      } else if (line.evaluation !== null) {
-        const v = parseFloat(line.evaluation);
-        ev.textContent = `${v > 0 ? '+' : ''}${line.evaluation}`;
-      }
-      row.appendChild(lbl);
-      row.appendChild(ev);
-      enginePanel.appendChild(row);
-    });
-  } else {
-    const noMove = document.createElement('div');
-    noMove.style.cssText = 'font-size:10px; color:#666; margin-top:3px;';
-    noMove.textContent = currentTurn === playerColor ? 'Analyzing…' : "Opponent's turn";
-    enginePanel.appendChild(noMove);
-  }
-
-  stats.appendChild(enginePanel);
-
-  // FEN copy box
-  const fenBox = document.createElement('div');
-  fenBox.textContent = fen;
-  fenBox.title = 'Click to copy FEN';
-  fenBox.style.cssText = `
-    font-size:7.5px; color:#666; margin-top:4px;
-    word-break:break-all; cursor:pointer;
-    padding:3px 4px; background:#111;
-    border-radius:3px; border:1px solid #2a2a4a; max-width:258px;
-  `;
-  fenBox.addEventListener('click', () => {
-    navigator.clipboard.writeText(fen).then(() => {
-      fenBox.style.color = '#7fff7f';
-      setTimeout(() => { fenBox.style.color = '#666'; }, 1000);
-    });
-  });
-  stats.appendChild(fenBox);
-  overlay.appendChild(stats);
-}
 
 // ============================================================
 // MAIN REFRESH LOOP
@@ -882,11 +591,8 @@ function refreshVisualizerLoop() {
     }
 
     lastFen = fen;
-    const fenToShow = isGameOver && lastFen ? lastFen : fen;
-    const matrix    = boardObjToMatrix(boardObj, playerColor);
 
-    // Live board overlay hidden — arrows + engine analysis still active
-    // createVisualizationOverlay(matrix, fenToShow, pieceCount, playerColor);
+    // Live board overlay removed — arrows + engine analysis still active
     document.getElementById('chess-live-board-overlay')?.remove();
 
     // BUG FIX #1: Actually call updateBoardArrows — was defined but never invoked!
@@ -917,7 +623,7 @@ function startVisualizer() {
   if (visualizerInterval) return; // already running
   if (!stockfishWorker)   initStockfishWorker();
   refreshVisualizerLoop();
-  visualizerInterval = setInterval(refreshVisualizerLoop, getActiveConfig().pollMs);
+  visualizerInterval = setInterval(refreshVisualizerLoop, ENGINE_POLL_MS);
   console.log('[Chess Visualizer] Started');
 }
 
